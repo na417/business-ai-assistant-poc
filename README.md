@@ -16,13 +16,29 @@
 社内問い合わせを想定し、質問の種類に応じて処理を自動分岐する AI アシスタントを実装した。  
 LLM に依存せず処理を制御可能な設計とし、誤回答を防ぐ判定ロジックとログ観測を備える。
 
-## デモ動画
+## デモ
 
-アプリの動作イメージは以下の動画で確認できます。
+このアプリでは、ユーザーの質問内容に応じて処理ルートを切り替えます。
 
-[デモ動画を見る](assets/demo.mp4)
+### 代表的な動作例
 
-動画では、FAQ回答、RAG回答、数値回答、天気API回答、NO_ANSWER時の挙動を確認できます。
+<img src="./images/demo_faq.png" alt="FAQ回答ルート" width="600">
+<img src="./images/demo_numeric.png" alt="数値回答ルート" width="600">
+<img src="./images/demo_no_answer.png" alt="NO_ANSWERルート" width="600">
+
+<details>
+<summary>他のデモ画面を見る</summary>
+
+<br>
+
+<img src="./images/demo_rag1.png" alt="RAG回答ルート" width="600"><img src="./images/demo_rag2.png" alt="RAG回答ルート" width="600">
+<img src="./images/demo_api.png" alt="外部API回答ルート" width="600">
+
+</details>
+
+### 操作デモ動画
+
+[デモ動画を見る](./assets/demo.mp4)
 
 ---
 
