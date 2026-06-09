@@ -6,21 +6,24 @@ import chromadb
 import requests
 import streamlit as st
 
-from llm import build_extract_answer, generate_rag_answer, embed_query
+from faq_utils import build_normalized_key, calc_keyword_overlap_score, normalize_text
+from llm import build_extract_answer, embed_query, generate_rag_answer
 from log_db import init_log_db, save_log
 from numeric_qa import answer_numeric_question
 from router import route_question
 from weather_api import answer_weather_question
-from faq_utils import build_normalized_key, calc_keyword_overlap_score, normalize_text
 
 DB_NAME = "faq.db"
 CHROMA_PATH = "./chroma_db"
 COLLECTION_NAME = "manual_chunks"
 
-# RAGの距離しきい値
-RAG_DISTANCE_THRESHOLD = 0.28
+# OpenAI Embedding移行後の暫定しきい値。
+# Gemini時代の 0.28 ではOpenAI Embeddingの距離スケールに合わないため再調整。
+RAG_DISTANCE_THRESHOLD = 1.45
+RAG_GAP_THRESHOLD = 0.02
 
-# 開発用の内部情報を画面に出すかどうか
+# 開発用の内部情報を画面に出すかどうか。
+# GitHub提出時や面接デモ時は False 推奨。
 DEBUG_MODE = False
 
 # FAQ採用の基本しきい値
@@ -33,6 +36,22 @@ DOMAIN_MAP = {
     "it": ["パスワード", "PC", "故障", "情報システム", "システム部"],
     "general_apply": ["出張", "備品", "名刺", "購買"],
 }
+
+IMPORTANT_RAG_KEYWORDS = [
+    "有給",
+    "有給休暇",
+    "交通費",
+    "経費",
+    "経費精算",
+    "備品",
+    "名刺",
+    "パスワード",
+    "在宅勤務",
+    "勤怠",
+    "遅刻",
+    "出張",
+    "購買",
+]
 
 
 def detect_domain(text: str) -> str:
@@ -63,7 +82,7 @@ def score_faq_candidate(
     base_score = calc_keyword_overlap_score(user_key, faq_key)
     score = base_score
 
-    IMPORTANT_KEYWORDS = [
+    important_keywords = [
         "経費精算",
         "交通費",
         "在宅勤務",
@@ -77,8 +96,8 @@ def score_faq_candidate(
         "名刺",
     ]
 
-    user_keywords = [kw for kw in IMPORTANT_KEYWORDS if kw in normalized_user]
-    faq_keywords = [kw for kw in IMPORTANT_KEYWORDS if kw in normalized_faq]
+    user_keywords = [kw for kw in important_keywords if kw in normalized_user]
+    faq_keywords = [kw for kw in important_keywords if kw in normalized_faq]
 
     for kw in user_keywords:
         if kw in faq_keywords:
@@ -199,7 +218,7 @@ def search_faq(user_question: str):
     return None
 
 
-def search_rag(user_question: str, n_results: int = 2):
+def search_rag(user_question: str, n_results: int = 5):
     query_embedding = embed_query(user_question)
 
     chroma_client = chromadb.PersistentClient(path=CHROMA_PATH)
@@ -213,12 +232,31 @@ def search_rag(user_question: str, n_results: int = 2):
 
     results = collection.query(
         query_embeddings=[query_embedding],
-        n_results=n_results
+        n_results=n_results,
     )
 
     documents = results["documents"][0] if results["documents"] else []
     metadatas = results["metadatas"][0] if results["metadatas"] else []
     distances = results["distances"][0] if results["distances"] else []
+
+    matched_keywords = [
+        keyword for keyword in IMPORTANT_RAG_KEYWORDS if keyword in user_question
+    ]
+
+    keyword_matched = False
+
+    if matched_keywords:
+        filtered = [
+            (doc, metadata, distance)
+            for doc, metadata, distance in zip(documents, metadatas, distances)
+            if any(keyword in doc for keyword in matched_keywords)
+        ]
+
+        if filtered:
+            keyword_matched = True
+            documents = [item[0] for item in filtered]
+            metadatas = [item[1] for item in filtered]
+            distances = [item[2] for item in filtered]
 
     best_distance = distances[0] if len(distances) >= 1 else None
     second_distance = distances[1] if len(distances) >= 2 else None
@@ -232,6 +270,9 @@ def search_rag(user_question: str, n_results: int = 2):
         "second_distance": second_distance,
         "gap": gap,
         "threshold": RAG_DISTANCE_THRESHOLD,
+        "gap_threshold": RAG_GAP_THRESHOLD,
+        "keyword_matched": keyword_matched,
+        "matched_keywords": matched_keywords,
         "judge": "",
         "reason": "",
     }
@@ -246,12 +287,17 @@ def search_rag(user_question: str, n_results: int = 2):
         rag_debug["reason"] = "no_distance"
         return [], [], [], rag_debug
 
+    if keyword_matched:
+        rag_debug["judge"] = "accepted"
+        rag_debug["reason"] = "keyword_match_priority"
+        return documents, metadatas, distances, rag_debug
+
     if best_distance > RAG_DISTANCE_THRESHOLD:
         rag_debug["judge"] = "rejected"
         rag_debug["reason"] = "distance_threshold_exceeded"
         return [], [], [], rag_debug
 
-    elif gap is not None and gap < 0.02:
+    if gap is not None and gap < RAG_GAP_THRESHOLD:
         rag_debug["judge"] = "rejected"
         rag_debug["reason"] = "ambiguous_gap"
         return [], [], [], rag_debug
@@ -276,6 +322,9 @@ def format_rag_debug_info(rag_debug: dict) -> str:
     second = rag_debug.get("second_distance")
     gap = rag_debug.get("gap")
     threshold = rag_debug.get("threshold")
+    gap_threshold = rag_debug.get("gap_threshold")
+    keyword_matched = rag_debug.get("keyword_matched")
+    matched_keywords = rag_debug.get("matched_keywords", [])
     judge = rag_debug.get("judge", "")
     reason = rag_debug.get("reason", "")
 
@@ -283,18 +332,21 @@ def format_rag_debug_info(rag_debug: dict) -> str:
     second_text = f"{second:.4f}" if second is not None else "None"
     gap_text = f"{gap:.4f}" if gap is not None else "None"
     threshold_text = f"{threshold:.4f}" if threshold is not None else "None"
+    gap_threshold_text = f"{gap_threshold:.4f}" if gap_threshold is not None else "None"
+    keywords_text = ",".join(matched_keywords) if matched_keywords else "None"
 
     return (
         f"RAG judge={judge}, reason={reason}, "
         f"best_distance={best_text}, second_distance={second_text}, "
-        f"gap={gap_text}, threshold={threshold_text}"
+        f"gap={gap_text}, threshold={threshold_text}, "
+        f"gap_threshold={gap_threshold_text}, "
+        f"keyword_matched={keyword_matched}, matched_keywords={keywords_text}"
     )
 
 
 st.set_page_config(
     page_title="業務問い合わせAIアシスタント",
-    page_icon="🤖",
-    layout="centered"
+    layout="centered",
 )
 
 init_log_db()
@@ -302,13 +354,13 @@ init_log_db()
 st.title("業務問い合わせAIアシスタント")
 st.write("FAQ検索・RAG・数値回答・天気APIを試すPoCです。")
 
-if not os.getenv("GEMINI_API_KEY"):
-    st.error("GEMINI_API_KEY が設定されていません。先に環境変数を設定してください。")
+if not os.getenv("OPENAI_API_KEY"):
+    st.error("OPENAI_API_KEY が設定されていません。先に環境変数を設定してください。")
     st.stop()
 
 question = st.text_input(
     "質問を入力してください",
-    placeholder="例：在宅勤務の申請はいつまでですか？"
+    placeholder="例：在宅勤務の申請はいつまでですか？",
 )
 
 if st.button("送信"):
@@ -340,7 +392,8 @@ if st.button("送信"):
                 st.caption(f"inhibitors: {', '.join(route_decision.inhibitors)}")
 
             st.caption(
-                f"numeric_score={route_decision.numeric_score} / api_score={route_decision.api_score}"
+                f"numeric_score={route_decision.numeric_score} / "
+                f"api_score={route_decision.api_score}"
             )
 
         try:
@@ -404,7 +457,16 @@ if st.button("送信"):
                     st.info("根拠: SQLite の faq テーブル")
 
                 else:
-                    docs, metadatas, distances, rag_debug = search_rag(cleaned_question, n_results=2)
+                    docs, metadatas, distances, rag_debug = search_rag(
+                        cleaned_question,
+                        n_results=5,
+                    )
+
+                    if DEBUG_MODE:
+                        st.markdown("### 取得されたRAG文書")
+                        for i, doc in enumerate(docs, start=1):
+                            st.write(f"**取得文書{i}:**")
+                            st.write(doc)
 
                     if DEBUG_MODE and rag_debug:
                         st.markdown("### RAG観察情報")
@@ -427,6 +489,10 @@ if st.button("送信"):
                             else "gap=None"
                         )
                         st.caption(f"threshold={rag_debug['threshold']:.4f}")
+                        st.caption(
+                            f"keyword_matched={rag_debug['keyword_matched']} / "
+                            f"matched_keywords={rag_debug['matched_keywords']}"
+                        )
 
                     if not docs:
                         final_route = "RAG"
@@ -434,14 +500,18 @@ if st.button("送信"):
                         log_status = "NO_ANSWER"
 
                         st.warning("文書内に該当情報がありません。")
-                        st.info("根拠となる文書が見つからなかった、または距離しきい値を超えたため、回答を控えました。")
+                        st.info(
+                            "根拠となる文書が見つからなかった、または検索条件を満たさなかったため、回答を控えました。"
+                        )
+
                     else:
                         used_fallback = False
 
                         try:
                             answer = generate_rag_answer(cleaned_question, docs)
                         except Exception as e:
-                            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                            error_text = str(e)
+                            if "429" in error_text or "rate_limit" in error_text.lower():
                                 answer = build_extract_answer(docs)
                                 used_fallback = True
                             else:
@@ -468,7 +538,9 @@ if st.button("送信"):
                             st.success("RAGルートで回答しました。")
 
                             if used_fallback:
-                                st.warning("生成AIの無料枠上限に達したため、要約ではなく関連文書をそのまま表示しています。")
+                                st.warning(
+                                    "生成APIでエラーが発生したため、要約ではなく関連文書をそのまま表示しています。"
+                                )
                                 st.markdown("### 関連文書")
                                 st.write(answer)
                             else:
@@ -483,7 +555,9 @@ if st.button("送信"):
                                     if i - 1 < len(metadatas) and metadatas[i - 1]:
                                         source = metadatas[i - 1].get("source", "")
                                         chunk_index = metadatas[i - 1].get("chunk_index", "")
-                                        st.caption(f"source={source}, chunk_index={chunk_index}")
+                                        st.caption(
+                                            f"source={source}, chunk_index={chunk_index}"
+                                        )
 
                                     if i - 1 < len(distances):
                                         st.caption(f"distance={distances[i - 1]:.4f}")
@@ -532,11 +606,15 @@ if st.button("送信"):
                 error_message=log_error_message,
                 router_layer=route_decision.layer,
                 router_reason=route_decision.reason,
-                router_scores=f"num={route_decision.numeric_score}, api={route_decision.api_score}",
+                router_scores=(
+                    f"num={route_decision.numeric_score}, "
+                    f"api={route_decision.api_score}"
+                ),
                 searched_location=searched_location,
             )
 
             if DEBUG_MODE:
                 st.caption(
-                    f"最終route: {final_route} / status: {log_status} / 処理時間: {processing_time} 秒"
+                    f"最終route: {final_route} / status: {log_status} / "
+                    f"処理時間: {processing_time} 秒"
                 )

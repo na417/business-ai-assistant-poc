@@ -15,8 +15,8 @@ def split_text(text: str) -> list[str]:
 
 
 def main():
-    if not os.getenv("GEMINI_API_KEY"):
-        raise EnvironmentError("GEMINI_API_KEY が設定されていません。")
+    if not os.getenv("OPENAI_API_KEY"):
+        raise EnvironmentError("OPENAI_API_KEY が設定されていません。")
 
     if not os.path.exists(TEXT_FILE):
         raise FileNotFoundError(f"{TEXT_FILE} が見つかりません。")

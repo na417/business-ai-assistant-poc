@@ -1,37 +1,30 @@
-from google import genai
-from google.genai import types
+from openai import OpenAI
 
-GENERATION_MODEL = "gemini-3-flash-preview"
-EMBEDDING_MODEL = "gemini-embedding-001"
+GENERATION_MODEL = "gpt-4.1-mini"
+EMBEDDING_MODEL = "text-embedding-3-small"
 EMBEDDING_DIMENSION = 768
 
-client = genai.Client()
+client = OpenAI()
 
 
 def embed_documents(texts: list[str]) -> list[list[float]]:
-    result = client.models.embed_content(
+    result = client.embeddings.create(
         model=EMBEDDING_MODEL,
-        contents=texts,
-        config=types.EmbedContentConfig(
-            task_type="RETRIEVAL_DOCUMENT",
-            output_dimensionality=EMBEDDING_DIMENSION,
-        ),
+        input=texts,
+        dimensions=EMBEDDING_DIMENSION,
     )
 
-    return [embedding.values for embedding in result.embeddings]
+    return [item.embedding for item in result.data]
 
 
 def embed_query(text: str) -> list[float]:
-    result = client.models.embed_content(
+    result = client.embeddings.create(
         model=EMBEDDING_MODEL,
-        contents=[text],
-        config=types.EmbedContentConfig(
-            task_type="RETRIEVAL_QUERY",
-            output_dimensionality=EMBEDDING_DIMENSION,
-        ),
+        input=[text],
+        dimensions=EMBEDDING_DIMENSION,
     )
 
-    return result.embeddings[0].values
+    return result.data[0].embedding
 
 
 def generate_rag_answer(user_question: str, retrieved_docs: list[str]) -> str:
@@ -50,13 +43,13 @@ def generate_rag_answer(user_question: str, retrieved_docs: list[str]) -> str:
 {user_question}
 """
 
-    response = client.models.generate_content(
+    response = client.responses.create(
         model=GENERATION_MODEL,
-        contents=prompt,
+        input=prompt,
     )
 
-    if hasattr(response, "text") and response.text:
-        return response.text
+    if response.output_text:
+        return response.output_text
 
     return "文書内に該当情報がありません"
 
